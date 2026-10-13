@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Citra Menu</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; cursor: none; }
+  .slide { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain;
+           opacity: 0; transition: opacity 0.8s ease; }
+  .slide.on { opacity: 1; }
+  #msg { position: absolute; left: 0; right: 0; bottom: 4vh; text-align: center;
+         color: #8a8a8a; font: 2.2vh/1.4 -apple-system, "Segoe UI", Roboto, sans-serif; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="msg"></div>
+<script>
+(function () {
+  // ---- Settings ----------------------------------------------------------
+  var CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTex9qCWM837UU0xAXrRlFh3zlZaS34HTVZMxKJX-4__cXyvNN8q-GTotVaXTqYuO8O-_N2RIC-wjE0/pub?gid=0&single=true&output=csv";
+  var IMAGE_BASE = "https://nirajkandel02-oss.github.io/citra-menu/";
+  var CHECK_EVERY_MS = 2 * 60 * 1000;     // look for sheet changes every 2 minutes
+  var FULL_RELOAD_MS = 6 * 60 * 60 * 1000; // reload the whole page every 6 hours (picks up code updates)
+  var DEFAULT_SECONDS = 15;                // used when a TV rotates images but seconds is 0 or empty
+
+  // ---- Which TV is this? -------------------------------------------------
+  var match = /[?&]screen=([^&#]*)/.exec(location.search);
+  var SCREEN = match ? decodeURIComponent(match[1]).trim().toLowerCase() : "";
+  var CACHE_KEY = "citra-menu:" + SCREEN;
+
+  var stage = document.getElementById("stage");
+  var msg = document.getElementById("msg");
+  var current = "";      // JSON of the list now on screen
+  var slides = [];
+  var index = 0;
+  var timer = null;
+
+  function say(text) { msg.textContent = text || ""; }
+
+  // ---- CSV parsing (handles quoted cells) --------------------------------
+  function parseCSV(text) {
+    var rows = [], row = [], cell = "", q = false;
+    for (var i = 0; i < text.length; i++) {
+      var c = text[i];
+      if (q) {
+        if (c === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+        else if (c === '"') { q = false; }
+        else { cell += c; }
+      } else if (c === '"') { q = true; }
+      else if (c === ",") { row.push(cell); cell = ""; }
+      else if (c === "\n" || c === "\r") {
+        if (c === "\r" && text[i + 1] === "\n") i++;
+        row.push(cell); rows.push(row); row = []; cell = "";
+      } else { cell += c; }
+    }
+    if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+    return rows;
+  }
+
+  // Turn the sheet into this TV's list of images
+  function listForThisScreen(text) {
+    var rows = parseCSV(text);
+    if (!rows.length) return null;
+    var head = rows[0].map(function (h) { return h.trim().toLowerCase(); });
+    var col = function (name) { return head.indexOf(name); };
+    var cScreen = col("screen"), cImage = col("image"), cSec = col("seconds"),
+        cShow = col("show"), cOrder = col("order");
+    if (cScreen < 0 || cImage < 0) return null; // not our sheet, ignore it
+
+    var list = [];
+    for (var r = 1; r < rows.length; r++) {
+      var row = rows[r];
+      var name = (row[cScreen] || "").trim().toLowerCase();
+      var image = (row[cImage] || "").trim();
+      var show = cShow < 0 ? true : (row[cShow] || "").trim().toUpperCase() === "TRUE";
+      if (name !== SCREEN || !image || !show) continue;
+      list.push({
+        image: image,
+        seconds: parseFloat(row[cSec]) || 0,
+        order: parseFloat(row[cOrder]) || 0
+      });
+    }
+    list.sort(function (a, b) { return a.order - b.order; });
+    return list;
+  }
+
+  // ---- Showing images ----------------------------------------------------
+  function show(list) {
+    var key = JSON.stringify(list);
+    if (key === current) return; // nothing changed
+    current = key;
+    clearTimeout(timer);
+
+    if (!list.length) {
+      stage.innerHTML = "";
+      slides = [];
+      say("No menu is set for " + SCREEN + ". Add a row for it in the sheet and tick show.");
+      return;
+    }
+
+    var fresh = [];
+    var loaded = 0, finished = 0;
+    list.forEach(function (item) {
+      var img = new Image();
+      img.className = "slide";
+      img.alt = "";
+      img.onload = function () { loaded++; done(); };
+      img.onerror = function () { img.dataset.bad = "1"; done(); };
+      img.src = IMAGE_BASE + item.image.replace(/^\/+/, "");
+      img.dataset.seconds = item.seconds;
+      fresh.push(img);
+    });
+
+    function done() {
+      finished++;
+      if (finished < fresh.length) return;
+      var good = fresh.filter(function (img) { return !img.dataset.bad; });
+      if (!good.length) {
+        // Keep whatever was showing before; try again on the next check
+        current = "";
+        if (!slides.length) say("Can't load the menu images for " + SCREEN + ". Check the file names in the sheet.");
+        return;
+      }
+      say("");
+      stage.innerHTML = "";
+      good.forEach(function (img) { stage.appendChild(img); });
+      slides = good;
+      index = 0;
+      slides[0].classList.add("on");
+      next();
+    }
+  }
+
+  function next() {
+    if (slides.length < 2) return;
+    var secs = parseFloat(slides[index].dataset.seconds) || DEFAULT_SECONDS;
+    timer = setTimeout(function () {
+      slides[index].classList.remove("on");
+      index = (index + 1) % slides.length;
+      slides[index].classList.add("on");
+      next();
+    }, secs * 1000);
+  }
+
+  // ---- Load the sheet (with offline backup) ------------------------------
+  function check() {
+    fetch(CSV_URL + "&t=" + Date.now(), { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
+      .then(function (text) {
+        var list = listForThisScreen(text);
+        if (!list) throw new Error("bad sheet");
+        try { localStorage.setItem(CACHE_KEY, JSON.stringify(list)); } catch (e) {}
+        show(list);
+      })
+      .catch(function () {
+        // No internet or Google hiccup: keep showing the last good menu
+        if (!slides.length) {
+          var saved = null;
+          try { saved = JSON.parse(localStorage.getItem(CACHE_KEY)); } catch (e) {}
+          if (saved) show(saved); else say("Waiting for internet to load the menu.");
+        }
+      });
+  }
+
+  if (!SCREEN) {
+    say("Add ?screen= and the TV's name to the end of this link, for example ?screen=bu-700-tv-1");
+    return;
+  }
+
+  // Show the saved menu right away, then check the sheet
+  try {
+    var saved = JSON.parse(localStorage.getItem(CACHE_KEY));
+    if (saved) show(saved);
+  } catch (e) {}
+  check();
+  setInterval(check, CHECK_EVERY_MS);
+  setInterval(function () {
+    // Only reload if the page is reachable, so an internet outage never blanks the screen
+    fetch(location.pathname + "?ping=" + Date.now(), { cache: "no-store" })
+      .then(function (r) { if (r.ok) location.reload(); })
+      .catch(function () {});
+  }, FULL_RELOAD_MS);
+})();
+</script>
+</body>
+</html>
