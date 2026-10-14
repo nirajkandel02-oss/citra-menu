@@ -9,6 +9,7 @@
   .slide { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain;
            opacity: 0; transition: opacity 0.8s ease; }
   .slide.on { opacity: 1; }
+  video.slide { background: #000; }
   #msg { position: absolute; left: 0; right: 0; bottom: 4vh; text-align: center;
          color: #8a8a8a; font: 2.2vh/1.4 -apple-system, "Segoe UI", Roboto, sans-serif; }
 </style>
@@ -102,15 +103,34 @@
 
     var fresh = [];
     var loaded = 0, finished = 0;
+    var single = list.length === 1;
     list.forEach(function (item) {
-      var img = new Image();
-      img.className = "slide";
-      img.alt = "";
-      img.onload = function () { loaded++; done(); };
-      img.onerror = function () { img.dataset.bad = "1"; done(); };
-      img.src = IMAGE_BASE + item.image.replace(/^\/+/, "");
-      img.dataset.seconds = item.seconds;
-      fresh.push(img);
+      var src = IMAGE_BASE + item.image.replace(/^\/+/, "");
+      var el, settled = false;
+      function ok() { if (settled) return; settled = true; loaded++; done(); }
+      function bad() { if (settled) return; settled = true; el.dataset.bad = "1"; done(); }
+      if (/\.(mp4|webm|mov|m4v)$/i.test(item.image)) {
+        // Video: muted so the TV is allowed to autoplay it
+        el = document.createElement("video");
+        el.muted = true;
+        el.setAttribute("muted", "");
+        el.setAttribute("playsinline", "");
+        el.preload = "auto";
+        el.loop = single; // one video on this TV: loop it forever
+        el.addEventListener("loadeddata", ok);
+        el.addEventListener("error", bad);
+        el.src = src;
+        el.load();
+      } else {
+        el = new Image();
+        el.alt = "";
+        el.onload = ok;
+        el.onerror = bad;
+        el.src = src;
+      }
+      el.className = "slide";
+      el.dataset.seconds = item.seconds;
+      fresh.push(el);
     });
 
     function done() {
@@ -124,24 +144,49 @@
         return;
       }
       say("");
+      slides.forEach(deactivate); // stop the old menu before swapping
       stage.innerHTML = "";
       good.forEach(function (img) { stage.appendChild(img); });
       slides = good;
       index = 0;
-      slides[0].classList.add("on");
+      activate(slides[0]);
       next();
     }
   }
 
+  function isVideo(el) { return el.tagName === "VIDEO"; }
+
+  function activate(el) {
+    el.classList.add("on");
+    if (isVideo(el)) {
+      try { el.currentTime = 0; } catch (e) {}
+      var p = el.play();
+      if (p && p.catch) p.catch(function () {});
+    }
+  }
+
+  function deactivate(el) {
+    el.classList.remove("on");
+    if (isVideo(el)) { el.pause(); el.onended = null; }
+  }
+
+  function advance() {
+    deactivate(slides[index]);
+    index = (index + 1) % slides.length;
+    activate(slides[index]);
+    next();
+  }
+
   function next() {
     if (slides.length < 2) return;
-    var secs = parseFloat(slides[index].dataset.seconds) || DEFAULT_SECONDS;
-    timer = setTimeout(function () {
-      slides[index].classList.remove("on");
-      index = (index + 1) % slides.length;
-      slides[index].classList.add("on");
-      next();
-    }, secs * 1000);
+    var el = slides[index];
+    var secs = parseFloat(el.dataset.seconds) || 0;
+    if (isVideo(el) && !secs) {
+      // Video with seconds 0: play it to the end, then move on
+      el.onended = advance;
+      return;
+    }
+    timer = setTimeout(advance, (secs || DEFAULT_SECONDS) * 1000);
   }
 
   // ---- Load the sheet (with offline backup) ------------------------------
