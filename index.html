@@ -67,7 +67,8 @@
     var head = rows[0].map(function (h) { return h.trim().toLowerCase(); });
     var col = function (name) { return head.indexOf(name); };
     var cScreen = col("screen"), cImage = col("image"), cSec = col("seconds"),
-        cShow = col("show"), cOrder = col("order");
+        cShow = col("show"), cOrder = col("order"),
+        cStart = col("start"), cEnd = col("end");
     if (cScreen < 0 || cImage < 0) return null; // not our sheet, ignore it
 
     var list = [];
@@ -80,11 +81,44 @@
       list.push({
         image: image,
         seconds: parseFloat(row[cSec]) || 0,
-        order: parseFloat(row[cOrder]) || 0
+        order: parseFloat(row[cOrder]) || 0,
+        start: cStart < 0 ? "" : (row[cStart] || "").trim(),
+        end: cEnd < 0 ? "" : (row[cEnd] || "").trim()
       });
     }
     list.sort(function (a, b) { return a.order - b.order; });
     return list;
+  }
+
+  // ---- Time schedule ---------------------------------------------------
+  // Turns "7:00", "07:00:00", "7 AM", "2:30 PM" or "14:30" into minutes after midnight
+  function toMinutes(t) {
+    var m = /^(\d{1,2})(?::(\d{2}))?(?::\d{2})?\s*(am|pm)?$/i.exec((t || "").trim());
+    if (!m) return null;
+    var h = parseInt(m[1], 10), min = parseInt(m[2] || "0", 10), ap = (m[3] || "").toLowerCase();
+    if (ap === "pm" && h < 12) h += 12;
+    if (ap === "am" && h === 12) h = 0;
+    if (h > 24 || min > 59) return null;
+    return h * 60 + min;
+  }
+
+  // Is this row allowed to show right now? Empty start/end means all day.
+  function onNow(item) {
+    var a = toMinutes(item.start), b = toMinutes(item.end);
+    if (a === null && b === null) return true;
+    var d = new Date(), now = d.getHours() * 60 + d.getMinutes();
+    if (a === null) a = 0;
+    if (b === null) b = 24 * 60;
+    if (a <= b) return now >= a && now < b;   // e.g. 7:00 to 11:00
+    return now >= a || now < b;               // overnight, e.g. 22:00 to 2:00
+  }
+
+  var allItems = null; // every row for this TV, before the time filter
+  function refresh() {
+    if (!allItems) return;
+    show(allItems.filter(onNow).map(function (i) {
+      return { image: i.image, seconds: i.seconds, order: i.order };
+    }));
   }
 
   // ---- Showing images ----------------------------------------------------
@@ -97,7 +131,7 @@
     if (!list.length) {
       stage.innerHTML = "";
       slides = [];
-      say("No menu is set for " + SCREEN + ". Add a row for it in the sheet and tick show.");
+      say("No menu is set for " + SCREEN + " right now. Check the sheet: show, start and end.");
       return;
     }
 
@@ -197,14 +231,15 @@
         var list = listForThisScreen(text);
         if (!list) throw new Error("bad sheet");
         try { localStorage.setItem(CACHE_KEY, JSON.stringify(list)); } catch (e) {}
-        show(list);
+        allItems = list;
+        refresh();
       })
       .catch(function () {
         // No internet or Google hiccup: keep showing the last good menu
         if (!slides.length) {
           var saved = null;
           try { saved = JSON.parse(localStorage.getItem(CACHE_KEY)); } catch (e) {}
-          if (saved) show(saved); else say("Waiting for internet to load the menu.");
+          if (saved) { allItems = saved; refresh(); } else say("Waiting for internet to load the menu.");
         }
       });
   }
@@ -217,10 +252,11 @@
   // Show the saved menu right away, then check the sheet
   try {
     var saved = JSON.parse(localStorage.getItem(CACHE_KEY));
-    if (saved) show(saved);
+    if (saved) { allItems = saved; refresh(); }
   } catch (e) {}
   check();
   setInterval(check, CHECK_EVERY_MS);
+  setInterval(refresh, 30 * 1000); // switch menus on time, even with no internet
   setInterval(function () {
     // Only reload if the page is reachable, so an internet outage never blanks the screen
     fetch(location.pathname + "?ping=" + Date.now(), { cache: "no-store" })
